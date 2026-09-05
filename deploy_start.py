@@ -166,9 +166,28 @@ with SB(uc=True, headless=False) as sb:
     print("LOGIN_OK" if ok else "LOGIN_FAIL")
     if not ok:
         sys.exit(1)
-    s, cookies = make_session(sb, plain_csrf := get_page_csrf(sb))
+    s, cookies = make_session(sb)
     OUT["cookie_names"] = list(cookies.keys())
     print("COOKIES:", list(cookies.keys()))
+
+    # 登录后落到 SPA 外壳页（无 Laravel 布局），先导航到真实服务器页取明文 csrf token
+    plain_csrf = get_page_csrf(sb)
+    for page in ["/servers/files?id=372611", "/servers/control?id=372611",
+                 f"/servers/files?id={UUID}", "/server/" + UUID]:
+        if plain_csrf:
+            break
+        try:
+            sb.open(CTRL + page)
+            time.sleep(6)
+            plain_csrf = get_page_csrf(sb)
+            print("TRY_PAGE", page, "csrf_len=", len(plain_csrf or ""))
+        except Exception as e:
+            print("TRY_PAGE_ERR", page, str(e)[:100])
+    if not plain_csrf:
+        # 兜底：把加密 XSRF-TOKEN cookie 原值放进 X-CSRF-TOKEN（Laravel 部分版本会解密）
+        plain_csrf = cookies.get("XSRF-TOKEN") or ""
+        print("CSRF_FALLBACK_FROM_COOKIE", len(plain_csrf))
+    s, cookies = make_session(sb, plain_csrf)
     print("PLAIN_CSRF_LEN:", len(plain_csrf))
 
     def call(method, path, data=None, ctype=None):
@@ -182,27 +201,27 @@ with SB(uc=True, headless=False) as sb:
             print("   browser_api err:", str(e)[:120])
             return api(s, method, path, data=data) if data is not None else api(s, method, path)
 
-    # 1. 上传文件（Pterodactyl files/write API，body=raw 内容）
+    # 1. 验证文件已由 SFTP 上传到位（GET 不需要 CSRF）
     f = call("GET", f"/api/client/servers/{UUID}/files/list?directory=/")
     print("FILES_STATUS", f.get("status"))
-    print("FILES_BODY", (f.get("body") or "")[:2000])
-
-    for fname in ["index.js", "config.json", "package.json"]:
-        if not os.path.exists(fname):
-            print("MISSING_LOCAL", fname)
-            continue
-        with open(fname, "rb") as fh:
-            data = fh.read()
-        r = call("POST", f"/api/client/servers/{UUID}/files/write?file={fname}", data, "application/octet-stream")
-        print("WRITE", fname, r.get("status"), (r.get("body") or r.get("err") or "")[:300])
-        OUT.setdefault("writes", []).append({"file": fname, "status": r.get("status"),
-                                              "body": (r.get("body") or r.get("err") or "")[:300]})
-    print("WRITES_DONE")
-
-    # 1b. 确认文件到位
-    f2 = call("GET", f"/api/client/servers/{UUID}/files/list?directory=/")
-    OUT["files_after"] = f2
-    print("FILES_AFTER", (f2.get("body") or f2.get("err") or "")[:1500])
+    fbody = f.get("body") or ""
+    OUT["files_before"] = fbody[:3000]
+    print("FILES_BODY", fbody[:3000])
+    has_index = "index.js" in fbody
+    has_config = "config.json" in fbody
+    print("HAS_INDEX_JS", has_index, "HAS_CONFIG", has_config)
+    if not (has_index and has_config):
+        # SFTP 未到位，尝试 API 写入兜底
+        for fname in ["index.js", "config.json", "package.json"]:
+            if not os.path.exists(fname):
+                continue
+            with open(fname, "rb") as fh:
+                data = fh.read()
+            r = call("POST", f"/api/client/servers/{UUID}/files/write?file={fname}", data, "application/octet-stream")
+            print("WRITE", fname, r.get("status"), (r.get("body") or r.get("err") or "")[:200])
+            OUT.setdefault("writes", []).append({"file": fname, "status": r.get("status"),
+                                                  "body": (r.get("body") or r.get("err") or "")[:200]})
+        print("WRITES_DONE")
 
     # 2. 启动
     p = call("POST", f"/api/client/servers/{UUID}/power", json.dumps({"signal": "start"}).encode())
