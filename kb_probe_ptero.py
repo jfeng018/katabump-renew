@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KataBump v5：dashboard /profil 拿账号 ID/username → 候选值试 control 登录"""
+"""KataBump v6：dashboard → 点 Access server (SSO?) → control 是否带会话 → 然后试 client API"""
 import sys, time, json, os, re
 sys.path.insert(0, '.')
 from seleniumbase import SB
@@ -59,67 +59,40 @@ with SB(uc=True, headless=False) as sb:
     if not login_dash(sb):
         print("DASH_LOGIN_FAIL")
         sys.exit(0)
-    # 读 profil 页面找 ID/username
-    for path in ["/profil", "/profil/security", "/dashboard"]:
-        try:
-            sb.open(BASE + path)
-            time.sleep(4)
+    OUT["dash_cookies"] = [c["name"] for c in sb.driver.get_cookies()]
+    # 打开服务器编辑页，找 Access server / Go to server 链接
+    try:
+        sb.open(BASE + "/servers/edit?id=372611")
+        time.sleep(5)
+        link = None
+        for a in sb.find_elements("a"):
+            href = a.get_attribute("href") or ""
+            t = (a.text or "").strip()
+            if "control.katabump.com" in href or "access" in t.lower():
+                link = a
+                print(f"找到链接: text={t} href={href}")
+                break
+        if link is None:
+            print("❌ 未找到 Access server 链接")
+            for a in sb.find_elements("a"):
+                if "server" in (a.get_attribute("href") or ""):
+                    print("  候选:", (a.text or "")[:40], a.get_attribute("href")[:120])
+        else:
+            href = link.get_attribute("href")
+            # 直接导航看是否 SSO
+            print("导航到 control:", href)
+            sb.open(href)
+            time.sleep(8)
+            OUT["sso_url"] = sb.get_current_url()
+            OUT["sso_title"] = sb.get_title() or ""
+            OUT["sso_cookies"] = [c["name"] for c in sb.driver.get_cookies()]
             src = sb.get_page_source() or ""
+            OUT["sso_len"] = len(src)
             text = re.sub(r"<[^>]+>", " ", src)
             text = re.sub(r"\s+", " ", text)
-            OUT["page_"+path.replace("/","_")+"_text"] = text[:1200]
-            # 找数字 ID / 用户名 hint
-            nums = re.findall(r"\b\d{4,9}\b", text)
-            OUT["page_"+path.replace("/","_")+"_nums"] = list(dict.fromkeys(nums))[:20]
-            m = re.search(r"(?:BuyerID|username|Your ID|User ID|ID)[:\s]*([A-Za-z0-9@._-]{2,40})", text, re.I)
-            if m:
-                OUT["page_"+path.replace("/","_")+"_idhint"] = m.group(1)
-        except Exception as e:
-            OUT["err_"+path] = str(e)[:120]
-    # 尝试 control 登录候选
-    candidates = []
-    if EMAIL: candidates.append(("email", EMAIL))
-    for v in OUT.values():
-        if isinstance(v, dict) and "idhint" in v:
-            candidates.append(("hint", v["idhint"]))
-    print("候选 username:", json.dumps([c[1][:6]+"***" for c in candidates], ensure_ascii=False))
-    for label, sid in candidates:
-        if not sid:
-            continue
-        try:
-            print(f"--- 尝试 control 登录 with {label}: {sid[:6]}***")
-            sb.open(CTRL + "/auth/login")
-            time.sleep(6)
-            try:
-                sb.wait_for_element('input[name="username"]', timeout=12)
-            except Exception:
-                print("无 username 框")
-                continue
-            sb.type('input[name="username"]', sid)
-            sb.type('input[name="password"]', PASSWORD)
-            time.sleep(1)
-            btn = None
-            for b in sb.find_elements('button'):
-                if (b.text or "").strip().lower() in ("login", "sign in", "continue"):
-                    btn = b
-                    break
-            if btn:
-                btn.click()
-            else:
-                sb.press_keys('input[name="password"]', '\n')
-            time.sleep(3)
-            for _ in range(12):
-                time.sleep(1)
-                if "/auth/login" not in sb.get_current_url():
-                    break
-            cur = sb.get_current_url()
-            print(f"  结果 URL: {cur}")
-            if "/auth/login" not in cur:
-                OUT["ctrl_login_with"] = label + ":" + ("***" + sid[-4:] if sid[-4:].isdigit() else sid[:3]+"***")
-                try:
-                    OUT["cookies"] = [c["name"] for c in sb.driver.get_cookies()]
-                except Exception as e:
-                    OUT["cookies"] = [str(e)[:80]]
+            OUT["sso_text"] = text[:500]
+            if "/auth/login" not in sb.get_current_url():
+                print("✅ SSO 成功！control 已带会话")
                 def api(p):
                     try:
                         return sb.execute_script(
@@ -132,9 +105,12 @@ with SB(uc=True, headless=False) as sb:
                 OUT["api_files"] = api("/api/client/servers/ff41b51e/files/list")
                 OUT["api_startup"] = api("/api/client/servers/ff41b51e/startup")
                 OUT["api_net"] = api("/api/client/servers/ff41b51e/network/allocation")
-                break
-        except Exception as e:
-            print(f"  {label} err: {str(e)[:120]}")
+            else:
+                print("❌ SSO 失败：control 仍要登录")
+                # 尝试把 dashboard 的 PHPSESSID 复制给 control？
+                print("dash cookie 不跨域，无法复制")
+    except Exception as e:
+        OUT["err"] = str(e)[:300]
 
     print("JSON_OUT<<")
     print(json.dumps(OUT, ensure_ascii=False, indent=1)[:16000])
