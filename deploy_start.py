@@ -99,7 +99,8 @@ def make_session(sb, plain_csrf=""):
         s.headers["Authorization"] = "Bearer " + bearer
     if xsrf:
         s.headers["X-XSRF-TOKEN"] = xsrf
-    if plain_csrf:
+    # 只有当 plain_csrf 是真正的明文 token（≠ 加密 cookie 值）时才设 X-CSRF-TOKEN
+    if plain_csrf and plain_csrf != xsrf:
         s.headers["X-CSRF-TOKEN"] = plain_csrf
     return s, cookies
 
@@ -170,6 +171,13 @@ with SB(uc=True, headless=False) as sb:
     OUT["cookie_names"] = list(cookies.keys())
     print("COOKIES:", list(cookies.keys()))
 
+    # 登录后 dump cookies 诊断 CSRF 可用性
+    import re as _re
+    _dc = sb.execute_script("return document.cookie;") or ""
+    print("DOC_COOKIE_AFTER_LOGIN:", _dc[:300])
+    _m = _re.search(r'XSRF-TOKEN=([^;]+)', _dc)
+    print("DOC_COOKIE_XSRF_LEN:", len(_m.group(1)) if _m else 0)
+
     # 登录后落到 SPA 外壳页（无 Laravel 布局），先导航到真实服务器页取明文 csrf token
     plain_csrf = get_page_csrf(sb)
     for page in ["/servers/files?id=372611", "/servers/control?id=372611",
@@ -184,22 +192,45 @@ with SB(uc=True, headless=False) as sb:
         except Exception as e:
             print("TRY_PAGE_ERR", page, str(e)[:100])
     if not plain_csrf:
-        # 兜底：把加密 XSRF-TOKEN cookie 原值放进 X-CSRF-TOKEN（Laravel 部分版本会解密）
-        plain_csrf = cookies.get("XSRF-TOKEN") or ""
-        print("CSRF_FALLBACK_FROM_COOKIE", len(plain_csrf))
+        # SPA 无明文 token → 从 document.cookie 取加密 XSRF-TOKEN（Laravel 会解密比对）
+        _m2 = _re.search(r'XSRF-TOKEN=([^;]+)', _dc)
+        if _m2:
+            plain_csrf = _m2.group(1)
+            print("CSRF_FALLBACK_FROM_DOC_COOKIE", len(plain_csrf))
+        else:
+            plain_csrf = cookies.get("XSRF-TOKEN") or ""
+            print("CSRF_FALLBACK_FROM_PY_COOKIES", len(plain_csrf))
     s, cookies = make_session(sb, plain_csrf)
     print("PLAIN_CSRF_LEN:", len(plain_csrf))
 
     def call(method, path, data=None, ctype=None):
-        """优先浏览器上下文 XHR（避开 CSRF），失败退回 requests"""
+        """浏览器 XHR 优先；419 时 fallback 到 requests（X-XSRF-TOKEN 走加密 cookie）"""
+        r = None
         try:
             r = json.loads(browser_api(sb, method, path, data, ctype, plain_csrf))
             if r.get("status") == 419:
-                print("   browser XHR 419, 试 requests")
-            return r
+                print("   browser XHR 419 → fallback requests")
+                r = None
         except Exception as e:
             print("   browser_api err:", str(e)[:120])
-            return api(s, method, path, data=data) if data is not None else api(s, method, path)
+        if r is None:
+            # requests fallback：X-XSRF-TOKEN = 加密 cookie 原值（Laravel 服务端解密）
+            _xsrf = cookies.get("XSRF-TOKEN") or ""
+            _hdrs = {"X-XSRF-TOKEN": _xsrf} if _xsrf else {}
+            if plain_csrf and plain_csrf != _xsrf:
+                _hdrs["X-CSRF-TOKEN"] = plain_csrf
+            if ctype:
+                _hdrs["Content-Type"] = ctype
+            try:
+                if data is not None:
+                    resp = s.request(method, CTRL + path, data=data, headers=_hdrs, timeout=30)
+                else:
+                    resp = s.request(method, CTRL + path, headers=_hdrs, timeout=30)
+                r = {"status": resp.status_code, "body": (resp.text or "")[:12000]}
+            except Exception as e:
+                r = {"err": str(e)[:150]}
+            print("   requests fallback:", r.get("status"), (r.get("body") or r.get("err") or "")[:150])
+        return r
 
     # 1. 验证文件已由 SFTP 上传到位（GET 不需要 CSRF）
     f = call("GET", f"/api/client/servers/{UUID}/files/list?directory=/")

@@ -45,7 +45,7 @@ jobs:
           KB_SFTP_HOST: '51.75.118.171'
           KB_SFTP_PORT: '2022'
           KB_USER: 'ff41b51e'
-          KB_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
+          KB_PASSWORD: ${{ secrets.KB_CTRL_PASSWORD }}
         run: |
           set -e
           export SSHPASS="$KB_PASSWORD"
