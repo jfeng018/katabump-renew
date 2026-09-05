@@ -4,7 +4,6 @@
 import sys, time, json, os, re
 sys.path.insert(0, '.')
 from seleniumbase import SB
-from seleniumbase.uc_manager import uc_gui_click_captcha
 import app as upapp
 
 BASE = upapp.BASE_URL
