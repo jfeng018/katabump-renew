@@ -1,0 +1,76 @@
+name: Vless Deploy to KataBump
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安装系统依赖
+        run: |
+          pip install paramiko requests seleniumbase websocket-client
+          seleniumbase install chromedriver
+          sudo apt-get update
+          sudo apt-get install -y sshpass xvfb x11-utils xdotool scrot fonts-noto-cjk
+
+      - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+
+      - name: 📄 生成 vless config（固定 UUID + 面板端口 20275）
+        run: |
+          python3 - << 'PYEOF'
+          import json
+          config = {
+            "log": {"level": "info"},
+            "inbounds": [{
+              "type": "vless", "tag": "vless-in",
+              "listen": "0.0.0.0", "listen_port": 20275,
+              "users": [{"uuid": "0febdf96-c364-4a8a-af2b-7707e102e31a"}],
+              "transport": {"type": "ws", "path": "/vless-ws"}
+            }],
+            "outbounds": [{"type": "direct", "tag": "direct"}]
+          }
+          with open('ptero-config.json', 'w') as f:
+              json.dump(config, f, indent=2)
+          print("config generated")
+          PYEOF
+
+      - name: 📤 SFTP 上传 vless 源码到服务器
+        env:
+          KB_SFTP_HOST: 'fr-node-50.katabump.com'
+          KB_SFTP_PORT: '2022'
+          KB_USER: 'ff41b51e'
+          KB_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
+        run: |
+          set -e
+          export SSHPASS="$KB_PASSWORD"
+          sshpass -e sftp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o UserKnownHostsFile=/dev/null -P "$KB_SFTP_PORT" "$KB_USER@$KB_SFTP_HOST" << 'EOF'
+          cd /home/container
+          put index.js index.js
+          put ptero-config.json config.json
+          put package.json package.json
+          ls -la
+          bye
+          EOF
+          echo "SFTP_UPLOAD_OK"
+
+      - name: 🖥️ 通过 panel client API 启动服务器
+        env:
+          KB_CTRL: 'https://control.katabump.com'
+          KB_USERNAME: ${{ secrets.KB_CTRL_USERNAME }}
+          KB_PASSWORD: ${{ secrets.KB_CTRL_PASSWORD }}
+          KB_SRV_UUID: 'ff41b51e'
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 deploy_start.py

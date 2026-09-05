@@ -1,0 +1,13 @@
+{
+  "name": "vless-node-bot",
+  "version": "1.0.0",
+  "description": "Sing-box VLESS Runner",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
+
