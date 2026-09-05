@@ -25,6 +25,11 @@ def login_ctrl(sb):
     except Exception:
         print("❌ control 登录页无 email input")
         sb.save_screenshot("ctrl_login_noinput.png")
+        # dump 页面 HTML 前 3000 字符看清实际内容
+        html = (sb.get_page_source() or "")[:3000]
+        print("PAGE_HTML<<")
+        print(html)
+        print(">>END")
         return False
     upapp.js_fill_input(sb, 'input[name="email"], input[type="email"]', EMAIL)
     time.sleep(1)
