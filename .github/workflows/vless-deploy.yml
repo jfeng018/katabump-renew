@@ -39,6 +39,8 @@ jobs:
               json.dump(config, f, indent=2)
           print("config generated")
           PYEOF
+          cp ptero-config.json config.json
+          echo "config.json updated"
 
       - name: 📤 SFTP 上传 vless 源码（跳过，改用面板 UI 上传）
         run: echo "SKIP SFTP — 由 deploy_start.py 浏览器 UI 上传"

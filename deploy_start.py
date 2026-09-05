@@ -254,8 +254,8 @@ with SB(uc=True, headless=False) as sb:
                                                   "body": (r.get("body") or r.get("err") or "")[:200]})
         print("WRITES_DONE")
 
-    # 2. 启动
-    p = call("POST", f"/api/client/servers/{UUID}/power", json.dumps({"signal": "start"}).encode())
+    # 2. 启动（必须带 Content-Type: application/json，否则 Laravel 不解析 signal）
+    p = call("POST", f"/api/client/servers/{UUID}/power", json.dumps({"signal": "start"}).encode(), "application/json")
     OUT["power_start"] = p
     print("POWER_START", p.get("status"), (p.get("body") or p.get("err") or "")[:300])
 
