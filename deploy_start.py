@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KataBump vless deploy: 登录 control → 验证文件 → 启动服务器 → websocket 抓日志 → TG 通知"""
-import sys, time, json, os, re
+"""KataBump vless deploy: 登录 control → 页面上下文 fetch 上传 → 启动 → websocket 抓日志 → TG 通知"""
+import sys, time, json, os, re, base64
 sys.path.insert(0, '.')
 from seleniumbase import SB
 import requests
@@ -90,13 +90,49 @@ def make_session(sb):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         "Accept": "application/json",
         "Referer": CTRL + "/",
+        "Origin": CTRL,
     })
     s.cookies.update(cookies)
-    tok = cookies.get("pterodactyl") or cookies.get("XSRF-TOKEN") or ""
-    if tok:
-        s.headers["Authorization"] = "Bearer " + tok
-        s.headers["X-CSRF-TOKEN"] = tok
+    bearer = cookies.get("pterodactyl") or ""
+    xsrf = cookies.get("XSRF-TOKEN") or ""
+    if bearer:
+        s.headers["Authorization"] = "Bearer " + bearer
+    if xsrf:
+        s.headers["X-XSRF-TOKEN"] = xsrf
+        s.headers["X-CSRF-TOKEN"] = xsrf
     return s, cookies
+
+
+def browser_api(sb, method, path, data=None, content_type=None):
+    """已登录页面上下文里用同步 XHR 打 client API：cookie + XSRF-TOKEN 天然正确，避开 CSRF"""
+    b64 = base64.b64encode(data).decode() if data is not None else None
+    js = r"""
+    var m = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
+    var xsrf = m ? decodeURIComponent(m[1]) : '';
+    var url = arguments[0], method = arguments[1], b64 = arguments[2], ctype = arguments[3];
+    var x = new XMLHttpRequest();
+    x.open(method, url, false);
+    x.setRequestHeader('Accept', 'application/json');
+    if (xsrf) {
+      x.setRequestHeader('X-XSRF-TOKEN', xsrf);
+      x.setRequestHeader('X-CSRF-TOKEN', xsrf);
+    }
+    if (ctype) x.setRequestHeader('Content-Type', ctype);
+    var body = null;
+    if (b64 !== null && b64 !== undefined && b64 !== '') {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      body = bytes.buffer;
+    }
+    try {
+      x.send(body);
+      return JSON.stringify({status: x.status, body: (x.responseText || '').slice(0, 9000)});
+    } catch (e) {
+      return JSON.stringify({status: -1, err: String(e).slice(0, 200)});
+    }
+    """
+    return sb.execute_script(js, CTRL + path, method, b64, content_type)
 
 def api(s, method, path, **kw):
     try:
@@ -114,10 +150,21 @@ with SB(uc=True, headless=False) as sb:
         sys.exit(1)
     s, cookies = make_session(sb)
     OUT["cookie_names"] = list(cookies.keys())
+    print("COOKIES:", list(cookies.keys()))
 
-    # 1. 验证 + 上传文件（Pterodactyl files/write API，body=raw 内容）
-    f = api(s, "GET", f"/api/client/servers/{UUID}/files/list?directory=/")
-    OUT["files"] = f
+    def call(method, path, data=None, ctype=None):
+        """优先浏览器上下文 XHR（避开 CSRF），失败退回 requests"""
+        try:
+            r = json.loads(browser_api(sb, method, path, data, ctype))
+            if r.get("status") == 419:
+                print("   browser XHR 419, 试 requests")
+            return r
+        except Exception as e:
+            print("   browser_api err:", str(e)[:120])
+            return api(s, method, path, data=data) if data is not None else api(s, method, path)
+
+    # 1. 上传文件（Pterodactyl files/write API，body=raw 内容）
+    f = call("GET", f"/api/client/servers/{UUID}/files/list?directory=/")
     print("FILES_STATUS", f.get("status"))
     print("FILES_BODY", (f.get("body") or "")[:2000])
 
@@ -127,34 +174,27 @@ with SB(uc=True, headless=False) as sb:
             continue
         with open(fname, "rb") as fh:
             data = fh.read()
-        try:
-            r = s.post(f"{CTRL}/api/client/servers/{UUID}/files/write",
-                       params={"file": fname},
-                       data=data,
-                       headers={"Content-Type": "application/octet-stream"},
-                       timeout=60)
-            print("WRITE", fname, r.status_code, (r.text or "")[:200])
-            OUT.setdefault("writes", []).append({"file": fname, "status": r.status_code, "body": (r.text or "")[:200]})
-        except Exception as e:
-            print("WRITE_ERR", fname, str(e)[:150])
-            OUT.setdefault("writes", []).append({"file": fname, "err": str(e)[:150]})
+        r = call("POST", f"/api/client/servers/{UUID}/files/write?file={fname}", data, "application/octet-stream")
+        print("WRITE", fname, r.get("status"), (r.get("body") or r.get("err") or "")[:300])
+        OUT.setdefault("writes", []).append({"file": fname, "status": r.get("status"),
+                                              "body": (r.get("body") or r.get("err") or "")[:300]})
     print("WRITES_DONE")
 
     # 1b. 确认文件到位
-    f2 = api(s, "GET", f"/api/client/servers/{UUID}/files/list?directory=/")
+    f2 = call("GET", f"/api/client/servers/{UUID}/files/list?directory=/")
     OUT["files_after"] = f2
-    print("FILES_AFTER", (f2.get("body") or "")[:1500])
+    print("FILES_AFTER", (f2.get("body") or f2.get("err") or "")[:1500])
 
     # 2. 启动
-    p = api(s, "POST", f"/api/client/servers/{UUID}/power", json={"signal": "start"})
+    p = call("POST", f"/api/client/servers/{UUID}/power", json.dumps({"signal": "start"}).encode())
     OUT["power_start"] = p
-    print("POWER_START", p.get("status"), (p.get("body") or "")[:300])
+    print("POWER_START", p.get("status"), (p.get("body") or p.get("err") or "")[:300])
 
     # 3. 轮询 running
     state = None
     for i in range(90):
         time.sleep(2)
-        r = api(s, "GET", f"/api/client/servers/{UUID}/resources")
+        r = call("GET", f"/api/client/servers/{UUID}/resources")
         try:
             state = json.loads(r["body"])["attributes"]["current_state"]
         except Exception:
@@ -173,7 +213,7 @@ with SB(uc=True, headless=False) as sb:
     ws_lines = []
     try:
         import websocket  # websocket-client
-        w = api(s, "GET", f"/api/client/servers/{UUID}/websocket")
+        w = call("GET", f"/api/client/servers/{UUID}/websocket")
         wd = json.loads(w["body"])["data"][0]
         token = wd["token"]
         sock = wd["socket"]
