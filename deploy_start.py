@@ -115,11 +115,35 @@ with SB(uc=True, headless=False) as sb:
     s, cookies = make_session(sb)
     OUT["cookie_names"] = list(cookies.keys())
 
-    # 1. 验证文件已上传
+    # 1. 验证 + 上传文件（Pterodactyl files/write API，body=raw 内容）
     f = api(s, "GET", f"/api/client/servers/{UUID}/files/list?directory=/")
     OUT["files"] = f
     print("FILES_STATUS", f.get("status"))
     print("FILES_BODY", (f.get("body") or "")[:2000])
+
+    for fname in ["index.js", "config.json", "package.json"]:
+        if not os.path.exists(fname):
+            print("MISSING_LOCAL", fname)
+            continue
+        with open(fname, "rb") as fh:
+            data = fh.read()
+        try:
+            r = s.post(f"{CTRL}/api/client/servers/{UUID}/files/write",
+                       params={"file": fname},
+                       data=data,
+                       headers={"Content-Type": "application/octet-stream"},
+                       timeout=60)
+            print("WRITE", fname, r.status_code, (r.text or "")[:200])
+            OUT.setdefault("writes", []).append({"file": fname, "status": r.status_code, "body": (r.text or "")[:200]})
+        except Exception as e:
+            print("WRITE_ERR", fname, str(e)[:150])
+            OUT.setdefault("writes", []).append({"file": fname, "err": str(e)[:150]})
+    print("WRITES_DONE")
+
+    # 1b. 确认文件到位
+    f2 = api(s, "GET", f"/api/client/servers/{UUID}/files/list?directory=/")
+    OUT["files_after"] = f2
+    print("FILES_AFTER", (f2.get("body") or "")[:1500])
 
     # 2. 启动
     p = api(s, "POST", f"/api/client/servers/{UUID}/power", json={"signal": "start"})
