@@ -21,13 +21,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sshpass xvfb x11-utils xdotool scrot fonts-noto-cjk
 
-      - name: ⚙ 设置代理 (sing-box)
-        continue-on-error: true
-        env:
-          NODE_LINK: ${{ secrets.NODE_LINK }}
-        run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-
       - name: 📄 生成 vless config（固定 UUID + 面板端口 20275）
         run: |
           python3 - << 'PYEOF'
@@ -47,7 +40,7 @@ jobs:
           print("config generated")
           PYEOF
 
-      - name: 📤 SFTP 上传 vless 源码到服务器
+      - name: 📤 SFTP 上传 vless 源码到服务器（直连，不走代理）
         env:
           KB_SFTP_HOST: 'fr-node-50.katabump.com'
           KB_SFTP_PORT: '2022'
