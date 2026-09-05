@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KataBump v7：dashboard 登录后，干净提取 /profil 的 username/ID/API 信息"""
+"""KataBump v8：control 登录（username=账号ID）+ client API 探测"""
 import sys, time, json, os, re
 sys.path.insert(0, '.')
 from seleniumbase import SB
-import app as upapp
 
-BASE = upapp.BASE_URL
-EMAIL = os.environ.get("KATABUMP_EMAIL", "")
-PASSWORD = os.environ.get("KATABUMP_PASSWORD", "")
+CTRL = os.environ.get("KB_CTRL", "https://control.katabump.com")
+KB_USERNAME = os.environ.get("KB_USERNAME", "")
+KB_PASSWORD = os.environ.get("KB_PASSWORD", "")
+
 OUT = {}
 
-def login_dash(sb):
-    print("🌐 dashboard 登录")
-    sb.uc_open_with_reconnect(BASE + "/auth/login", reconnect_time=8)
-    for i in range(40):
-        src = sb.get_page_source() or ""
-        if 'name="email"' in src.lower():
-            break
-        time.sleep(1)
+def login_ctrl(sb):
+    print("🌐 打开 control 登录页")
+    sb.open(CTRL + "/auth/login")
+    time.sleep(8)
+    print("URL:", sb.get_current_url())
     try:
-        sb.wait_for_element('input[type="email"], input[name="email"]', timeout=20)
+        sb.wait_for_element('input[name="username"]', timeout=15)
+        print("✅ 找到 username 输入框")
     except Exception:
-        print("❌ dash 无 email")
+        print("❌ 无 username")
+        sb.save_screenshot("ctrl_login_noinput.png")
         return False
-    upapp.js_fill_input(sb, 'input[type="email"], input[name="email"]', EMAIL)
+    print("填 username:", KB_USERNAME)
+    sb.type('input[name="username"]', KB_USERNAME)
     time.sleep(1)
-    upapp.js_fill_input(sb, 'input[type="password"], input[name="password"]', PASSWORD)
+    sb.type('input[name="password"]', KB_PASSWORD)
     time.sleep(1)
-    for i in range(60):
+    # 如果有 turnstile 处理
+    for i in range(30):
         try:
             has_ts = sb.execute_script("return !!document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]') || !!document.querySelector('.cf-turnstile')")
         except Exception:
@@ -41,46 +42,67 @@ def login_dash(sb):
                 print("captcha:", str(e)[:80])
             break
         time.sleep(1)
-    try:
-        sb.press_keys('input[type="password"], input[name="password"]', '\n')
-    except Exception:
-        pass
-    for _ in range(15):
-        time.sleep(1)
-        cur = sb.get_current_url() or ""
-        if "/dashboard" in cur:
+    btn = None
+    for b in sb.find_elements('button'):
+        t = (b.text or "").strip().lower()
+        if t in ("login", "sign in", "continue", "connexion"):
+            btn = b
             break
-    print("dash URL:", sb.get_current_url())
-    return "/dashboard" in sb.get_current_url()
-
-def clean_text(html):
-    html = re.sub(r"<style.*?</style>", " ", html, flags=re.S | re.I)
-    html = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
-    html = re.sub(r"<[^>]+>", " | ", html)
-    html = re.sub(r"\s*\|\s*", " | ", html)
-    html = re.sub(r"\s+", " ", html)
-    return html
+    if btn:
+        print("点按钮:", btn.text)
+        btn.click()
+    else:
+        print("无 login 按钮，回车")
+        sb.press_keys('input[name="password"]', '\n')
+    time.sleep(3)
+    for _ in range(12):
+        time.sleep(1)
+        if "/auth/login" not in sb.get_current_url():
+            break
+    cur = sb.get_current_url()
+    print("登录后 URL:", cur)
+    if "/auth/login" in cur:
+        try:
+            src = sb.get_page_source() or ""
+            txt = re.sub(r"<[^>]+>", " ", src)
+            txt = re.sub(r"\s+", " ", txt)
+            for kw in ["incorrect", "invalid", "wrong", "no user", "not found", "password", "找不到", "错误"]:
+                i = txt.lower().find(kw)
+                if i >= 0:
+                    print(f"提示[{kw}]:", txt[max(0,i-100):i+200])
+                    break
+        except Exception as e:
+            print("读提示 err:", str(e)[:80])
+        sb.save_screenshot("ctrl_login_fail.png")
+        return False
+    return True
 
 with SB(uc=True, headless=False) as sb:
-    if not login_dash(sb):
-        print("DASH_LOGIN_FAIL")
-        sys.exit(0)
-    for path, label in [("/profil", "profil"), ("/profil/security", "security"), ("/dashboard", "dash")]:
+    ok = login_ctrl(sb)
+    print("LOGIN_OK" if ok else "LOGIN_FAIL")
+    if not ok:
+        sys.exit(1)
+    try:
+        OUT["cookies"] = [c["name"] for c in sb.driver.get_cookies()]
+    except Exception as e:
+        OUT["cookies"] = [str(e)[:80]]
+
+    def api(sb, path):
         try:
-            sb.open(BASE + path)
-            time.sleep(4)
-            src = sb.get_page_source() or ""
-            text = clean_text(src)
-            OUT[label + "_clean"] = text[:2500]
-            # input 值
-            vals = re.findall(r'<input[^>]*value="([^"]+)"[^>]*>', src)
-            OUT[label + "_inputvals"] = vals[:30]
-            # all labels
-            labels = re.findall(r'<label[^>]*>(.*?)</label>', src, re.S)
-            OUT[label + "_labels"] = [re.sub(r"<[^>]+>", "", l).strip()[:60] for l in labels[:30] if re.sub(r"<[^>]+>", "", l).strip()]
+            return sb.execute_script(
+                "var x=new XMLHttpRequest();x.open('GET',arguments[0],false);"
+                "x.setRequestHeader('Accept','application/json');x.send();"
+                "return x.responseText.slice(0,12000)", CTRL + path)
         except Exception as e:
-            OUT["err_" + label] = str(e)[:150]
+            return "ERR:" + str(e)[:100]
+
+    OUT["api_client"] = api(sb, "/api/client")
+    OUT["api_servers"] = api(sb, "/api/client/servers")
+    OUT["api_srv_files"] = api(sb, "/api/client/servers/ff41b51e/files/list")
+    OUT["api_srv_startup"] = api(sb, "/api/client/servers/ff41b51e/startup")
+    OUT["api_srv_net"] = api(sb, "/api/client/servers/ff41b51e/network/allocation")
+    OUT["api_srv_res"] = api(sb, "/api/client/servers/ff41b51e/resources")
 
     print("JSON_OUT<<")
-    print(json.dumps(OUT, ensure_ascii=False, indent=1)[:15000])
+    print(json.dumps(OUT, ensure_ascii=False, indent=1)[:18000])
     print(">>END")
