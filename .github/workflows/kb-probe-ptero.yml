@@ -34,8 +34,8 @@ jobs:
       - name: 🚀 运行 Pterodactyl 探针（只读）
         env:
           KB_CTRL: 'https://control.katabump.com'
-          KB_USERNAME: '3d9e13074e18f4d'
-          KB_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
+          KB_USERNAME: ${{ secrets.KB_CTRL_USERNAME }}
+          KB_PASSWORD: ${{ secrets.KB_CTRL_PASSWORD }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 kb_probe_ptero.py
 
