@@ -83,7 +83,7 @@ def get_cookies(sb):
             print("get_cookies err:", str(e2)[:120])
             return {}
 
-def make_session(sb):
+def make_session(sb, plain_csrf=""):
     cookies = get_cookies(sb)
     s = requests.Session()
     s.headers.update({
@@ -99,25 +99,43 @@ def make_session(sb):
         s.headers["Authorization"] = "Bearer " + bearer
     if xsrf:
         s.headers["X-XSRF-TOKEN"] = xsrf
-        s.headers["X-CSRF-TOKEN"] = xsrf
+    if plain_csrf:
+        s.headers["X-CSRF-TOKEN"] = plain_csrf
     return s, cookies
 
 
-def browser_api(sb, method, path, data=None, content_type=None):
-    """已登录页面上下文里用同步 XHR 打 client API：cookie + XSRF-TOKEN 天然正确，避开 CSRF"""
+def get_page_csrf(sb):
+    """取页面里的明文 session CSRF token（Laravel 布局注入）"""
+    js = r"""
+    var m = document.querySelector('meta[name="csrf-token"]');
+    if (m && m.content) return m.content;
+    try {
+      if (window.Laravel && window.Laravel.csrfToken) return window.Laravel.csrfToken;
+    } catch (e) {}
+    var i = document.querySelector('input[name="_token"]');
+    if (i && i.value) return i.value;
+    return '';
+    """
+    try:
+        return sb.execute_script(js) or ""
+    except Exception:
+        return ""
+
+
+def browser_api(sb, method, path, data=None, content_type=None, plain_csrf=""):
+    """已登录页面上下文里用同步 XHR 打 client API：
+    X-CSRF-TOKEN = 明文 session token；X-XSRF-TOKEN = 加密 cookie 原值"""
     b64 = base64.b64encode(data).decode() if data is not None else None
     js = r"""
     var m = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
-    var xsrf = m ? decodeURIComponent(m[1]) : '';
-    var url = arguments[0], method = arguments[1], b64 = arguments[2], ctype = arguments[3];
+    var xsrfRaw = m ? m[1] : '';
+    var url = arguments[0], method = arguments[1], b64 = arguments[2], ctype = arguments[3], plain = arguments[4];
     var x = new XMLHttpRequest();
     x.open(method, url, false);
     x.setRequestHeader('Accept', 'application/json');
-    if (xsrf) {
-      x.setRequestHeader('X-XSRF-TOKEN', xsrf);
-      x.setRequestHeader('X-CSRF-TOKEN', xsrf);
-    }
-    if (ctype) x.setRequestHeader('Content-Type', ctype);
+    if (xsrfRaw) x.setRequestHeader('X-XSRF-TOKEN', xsrfRaw);
+    if (plain)   x.setRequestHeader('X-CSRF-TOKEN', plain);
+    if (ctype)   x.setRequestHeader('Content-Type', ctype);
     var body = null;
     if (b64 !== null && b64 !== undefined && b64 !== '') {
       var bin = atob(b64);
@@ -132,7 +150,7 @@ def browser_api(sb, method, path, data=None, content_type=None):
       return JSON.stringify({status: -1, err: String(e).slice(0, 200)});
     }
     """
-    return sb.execute_script(js, CTRL + path, method, b64, content_type)
+    return sb.execute_script(js, CTRL + path, method, b64, content_type, plain_csrf)
 
 def api(s, method, path, **kw):
     try:
@@ -148,14 +166,15 @@ with SB(uc=True, headless=False) as sb:
     print("LOGIN_OK" if ok else "LOGIN_FAIL")
     if not ok:
         sys.exit(1)
-    s, cookies = make_session(sb)
+    s, cookies = make_session(sb, plain_csrf := get_page_csrf(sb))
     OUT["cookie_names"] = list(cookies.keys())
     print("COOKIES:", list(cookies.keys()))
+    print("PLAIN_CSRF_LEN:", len(plain_csrf))
 
     def call(method, path, data=None, ctype=None):
         """优先浏览器上下文 XHR（避开 CSRF），失败退回 requests"""
         try:
-            r = json.loads(browser_api(sb, method, path, data, ctype))
+            r = json.loads(browser_api(sb, method, path, data, ctype, plain_csrf))
             if r.get("status") == 419:
                 print("   browser XHR 419, 试 requests")
             return r
