@@ -1,0 +1,33 @@
+name: Vless Cleanup from KataBump
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安装系统依赖
+        run: |
+          pip install requests seleniumbase
+          seleniumbase install chromedriver
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+
+      - name: 🧹 停止服务器并删除 vless 文件
+        env:
+          KB_CTRL: 'https://control.katabump.com'
+          KB_USERNAME: ${{ secrets.KB_CTRL_USERNAME }}
+          KB_PASSWORD: ${{ secrets.KB_CTRL_PASSWORD }}
+          KB_SRV_UUID: 'ff41b51e'
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 cleanup_vless.py
